@@ -5,7 +5,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import httpx
 import os
 import json
@@ -20,7 +20,7 @@ app = FastAPI(title="ExamCraft API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 배포 시 도메인으로 제한
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,7 +31,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ── 사용자 인증 ──
 async def get_current_user(authorization: str = Header(...)):
-    """JWT 토큰으로 사용자 인증"""
     try:
         token = authorization.replace("Bearer ", "")
         user = supabase.auth.get_user(token)
@@ -48,10 +47,14 @@ async def get_current_user(authorization: str = Header(...)):
 class SchoolCreate(BaseModel):
     school_id: str
     school_name: str
-    grade: Optional[str] = ""
-    choice_style: Optional[str] = ""
-    error_pattern: Optional[str] = ""
-    stems: Optional[dict] = {}
+    grade: str = ""
+    choice_style: str = ""
+    error_pattern: str = ""
+    stems: Dict[str, Any] = {}
+
+    class Config:
+        # pydantic v1 호환
+        arbitrary_types_allowed = True
 
 @app.get("/schools")
 async def get_schools(user=Depends(get_current_user)):
@@ -88,7 +91,7 @@ async def update_school(school_id: str, data: SchoolCreate, user=Depends(get_cur
 
 class TemplateItem(BaseModel):
     type_code: str
-    prompt: Optional[str] = ""
+    prompt: str = ""
 
 @app.get("/templates/{school_id}")
 async def get_templates(school_id: str, user=Depends(get_current_user)):
@@ -115,9 +118,9 @@ class GenerateRequest(BaseModel):
     passage: str
     type_codes: List[str]
     school_id: str
-    passage_id: Optional[str] = ""
+    passage_id: str = ""
 
-CREDIT_PER_QUESTION = 1  # 문제 1개당 크레딧 1개 차감
+CREDIT_PER_QUESTION = 1
 
 def get_stem(stems: dict, type_code: str) -> str:
     stem_map = {
@@ -181,10 +184,8 @@ def build_system_prompt():
 
 @app.post("/generate")
 async def generate_questions(req: GenerateRequest, user=Depends(get_current_user)):
-    # 1. 크레딧 확인
     credit_res = supabase.table("credits").select("balance").eq("user_id", user.id).execute()
     if not credit_res.data:
-        # 크레딧 레코드 없으면 생성
         supabase.table("credits").insert({"user_id": user.id, "balance": 0}).execute()
         balance = 0
     else:
@@ -194,7 +195,6 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
     if balance < required:
         raise HTTPException(status_code=402, detail=f"크레딧 부족 (필요: {required}, 보유: {balance})")
 
-    # 2. 학교/템플릿/발문 로드
     school_res = supabase.table("schools").select("*")\
         .eq("user_id", user.id).eq("school_id", req.school_id).execute()
     school = school_res.data[0] if school_res.data else {}
@@ -204,7 +204,6 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
         .eq("user_id", user.id).eq("school_id", req.school_id).execute()
     template_map = {t["type_code"]: t["prompt"] for t in (tmpl_res.data or [])}
 
-    # 3. 지문 저장
     if req.passage_id:
         supabase.table("passages").upsert({
             "user_id": user.id,
@@ -213,7 +212,6 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
             "content": req.passage,
         }, on_conflict="user_id,school_id,passage_id").execute()
 
-    # 4. 문제 생성
     results = []
     system_prompt = build_system_prompt()
 
@@ -232,7 +230,6 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
                 clean = clean[start:end+1]
             parsed = json.loads(clean)
 
-            # 5. DB 저장
             q_res = supabase.table("questions").insert({
                 "user_id": user.id,
                 "school_id": req.school_id,
@@ -252,7 +249,6 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
                 **parsed
             })
 
-            # 6. 크레딧 차감
             supabase.table("credits").update({"balance": balance - CREDIT_PER_QUESTION})\
                 .eq("user_id", user.id).execute()
             supabase.table("credit_history").insert({
@@ -283,7 +279,7 @@ async def get_questions(school_id: Optional[str] = None, user=Depends(get_curren
 class QuestionUpdate(BaseModel):
     stem: Optional[str] = None
     question: Optional[str] = None
-    choices: Optional[list] = None
+    choices: Optional[List[str]] = None
     answer: Optional[str] = None
     explanation: Optional[str] = None
     status: Optional[str] = None
@@ -291,7 +287,8 @@ class QuestionUpdate(BaseModel):
 
 @app.put("/questions/{question_id}")
 async def update_question(question_id: str, data: QuestionUpdate, user=Depends(get_current_user)):
-    update_data = {k: v for k, v in data.dict().items() if v is not None}
+    # pydantic v1 호환: dict()로 변환 후 None 제거
+    update_data = {k: v for k, v in data.__dict__.items() if v is not None}
     res = supabase.table("questions").update(update_data)\
         .eq("id", question_id).eq("user_id", user.id).execute()
     return res.data
@@ -302,7 +299,6 @@ async def update_question(question_id: str, data: QuestionUpdate, user=Depends(g
 
 @app.post("/questions/{question_id}/regenerate")
 async def regenerate_question(question_id: str, user=Depends(get_current_user)):
-    # 기존 문제 조회
     q_res = supabase.table("questions").select("*")\
         .eq("id", question_id).eq("user_id", user.id).execute()
     if not q_res.data:
@@ -313,7 +309,6 @@ async def regenerate_question(question_id: str, user=Depends(get_current_user)):
     passage_id = q["passage_id"]
     type_code = q["type_code"]
 
-    # 저장된 지문 조회
     p_res = supabase.table("passages").select("content")\
         .eq("user_id", user.id).eq("school_id", school_id).eq("passage_id", passage_id).execute()
     if not p_res.data:
@@ -321,7 +316,6 @@ async def regenerate_question(question_id: str, user=Depends(get_current_user)):
 
     passage = p_res.data[0]["content"]
 
-    # 재생성 (generate와 동일 로직)
     gen_res = await generate_questions(
         GenerateRequest(
             passage=passage,
@@ -334,7 +328,6 @@ async def regenerate_question(question_id: str, user=Depends(get_current_user)):
 
     if gen_res["results"] and gen_res["results"][0].get("success"):
         new_q = gen_res["results"][0]
-        # 기존 문제 덮어쓰기
         supabase.table("questions").update({
             "question": new_q.get("question", ""),
             "choices": new_q.get("choices", []),
@@ -343,7 +336,6 @@ async def regenerate_question(question_id: str, user=Depends(get_current_user)):
             "status": "미검토",
             "memo": "",
         }).eq("id", question_id).execute()
-        # 새로 생성된 중복 레코드 삭제
         if new_q.get("id"):
             supabase.table("questions").delete().eq("id", new_q["id"]).execute()
 
