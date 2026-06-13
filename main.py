@@ -1,10 +1,9 @@
 # =============================================
-# ExamCraft FastAPI 백엔드
+# ExamCraft FastAPI 백엔드 (pydantic 없는 버전)
 # =============================================
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import httpx
 import os
@@ -44,54 +43,38 @@ async def get_current_user(authorization: str = Header(...)):
 # 학교 설정 API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-class SchoolCreate(BaseModel):
-    school_id: str
-    school_name: str
-    grade: str = ""
-    choice_style: str = ""
-    error_pattern: str = ""
-    stems: Dict[str, Any] = {}
-
-    class Config:
-        # pydantic v1 호환
-        arbitrary_types_allowed = True
-
 @app.get("/schools")
 async def get_schools(user=Depends(get_current_user)):
     res = supabase.table("schools").select("*").eq("user_id", user.id).execute()
     return res.data
 
 @app.post("/schools")
-async def create_school(data: SchoolCreate, user=Depends(get_current_user)):
+async def create_school(data: Dict[str, Any] = Body(...), user=Depends(get_current_user)):
     res = supabase.table("schools").upsert({
         "user_id": user.id,
-        "school_id": data.school_id,
-        "school_name": data.school_name,
-        "grade": data.grade,
-        "choice_style": data.choice_style,
-        "error_pattern": data.error_pattern,
-        "stems": data.stems,
+        "school_id": data.get("school_id", ""),
+        "school_name": data.get("school_name", ""),
+        "grade": data.get("grade", ""),
+        "choice_style": data.get("choice_style", ""),
+        "error_pattern": data.get("error_pattern", ""),
+        "stems": data.get("stems", {}),
     }, on_conflict="user_id,school_id").execute()
     return res.data
 
 @app.put("/schools/{school_id}")
-async def update_school(school_id: str, data: SchoolCreate, user=Depends(get_current_user)):
+async def update_school(school_id: str, data: Dict[str, Any] = Body(...), user=Depends(get_current_user)):
     res = supabase.table("schools").update({
-        "school_name": data.school_name,
-        "grade": data.grade,
-        "choice_style": data.choice_style,
-        "error_pattern": data.error_pattern,
-        "stems": data.stems,
+        "school_name": data.get("school_name", ""),
+        "grade": data.get("grade", ""),
+        "choice_style": data.get("choice_style", ""),
+        "error_pattern": data.get("error_pattern", ""),
+        "stems": data.get("stems", {}),
     }).eq("user_id", user.id).eq("school_id", school_id).execute()
     return res.data
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 유형 템플릿 API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class TemplateItem(BaseModel):
-    type_code: str
-    prompt: str = ""
 
 @app.get("/templates/{school_id}")
 async def get_templates(school_id: str, user=Depends(get_current_user)):
@@ -100,25 +83,19 @@ async def get_templates(school_id: str, user=Depends(get_current_user)):
     return res.data
 
 @app.post("/templates/{school_id}")
-async def save_templates(school_id: str, items: List[TemplateItem], user=Depends(get_current_user)):
+async def save_templates(school_id: str, items: List[Dict[str, Any]] = Body(...), user=Depends(get_current_user)):
     rows = [{
         "user_id": user.id,
         "school_id": school_id,
-        "type_code": item.type_code,
-        "prompt": item.prompt or "",
+        "type_code": item.get("type_code", ""),
+        "prompt": item.get("prompt", ""),
     } for item in items]
-    res = supabase.table("templates").upsert(rows, on_conflict="user_id,school_id,type_code").execute()
+    supabase.table("templates").upsert(rows, on_conflict="user_id,school_id,type_code").execute()
     return {"success": True}
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 문제 생성 API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class GenerateRequest(BaseModel):
-    passage: str
-    type_codes: List[str]
-    school_id: str
-    passage_id: str = ""
 
 CREDIT_PER_QUESTION = 1
 
@@ -162,19 +139,14 @@ def build_system_prompt():
 모든 문제는 중1~3 수준에 맞게 출제하라. 강남권 중학교 내신 기준 중~상 난이도로 출제하라.
 
 [필수 출력 규칙]
-1. 빈칸 표시: 빈칸은 반드시 ______ (언더바 6개)로만 표시하라. 빈칸 자리에 절대 답을 채우지 마라.
-2. 밑줄 표시: 밑줄 칠 어구는 _어구_ 형식으로 표시하라. (언더바로 감싸기)
-   - 번호기호가 있으면: ⓐ_어구_ ①_어구_ 형식
-   - 번호기호가 없으면: _어구_ 형식
-   - 언더바 6개 이상(______)은 빈칸 표시이므로 밑줄 표시에 사용하지 마라.
+1. 빈칸 표시: 빈칸은 반드시 ______ (언더바 6개)로만 표시하라.
+2. 밑줄 표시: 밑줄 칠 어구는 _어구_ 형식으로 표시하라.
 3. question 필드에서 발문을 포함하지 마라. question 필드는 지문 내용만 포함하라.
 4. 선택지(choices) 필드: 선택지 5개를 반드시 배열의 개별 요소로 분리하라.
-   올바른 예: ["①문장1", "②문장2", "③문장3", "④문장4", "⑤문장5"]
-   잘못된 예: "①문장1 ②문장2 ③문장3" (하나로 합치기 금지)
 5. 서답형(MT15)은 choices를 빈 배열 []로 반환.
-6. question/answer 필드에서 큰따옴표 사용 금지. 반드시 작은따옴표 사용.
+6. question/answer 필드에서 큰따옴표 사용 금지.
 
-출력은 반드시 { 로 시작해서 } 로 끝나는 순수 JSON 객체만 출력하세요.
+출력은 반드시 순수 JSON 객체만 출력하세요.
 {
   "question": "지문 내용",
   "choices": ["①선택지1", "②선택지2", "③선택지3", "④선택지4", "⑤선택지5"],
@@ -183,7 +155,12 @@ def build_system_prompt():
 }"""
 
 @app.post("/generate")
-async def generate_questions(req: GenerateRequest, user=Depends(get_current_user)):
+async def generate_questions(req: Dict[str, Any] = Body(...), user=Depends(get_current_user)):
+    passage = req.get("passage", "")
+    type_codes = req.get("type_codes", [])
+    school_id = req.get("school_id", "")
+    passage_id = req.get("passage_id", "")
+
     credit_res = supabase.table("credits").select("balance").eq("user_id", user.id).execute()
     if not credit_res.data:
         supabase.table("credits").insert({"user_id": user.id, "balance": 0}).execute()
@@ -191,35 +168,35 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
     else:
         balance = credit_res.data[0]["balance"]
 
-    required = len(req.type_codes) * CREDIT_PER_QUESTION
+    required = len(type_codes) * CREDIT_PER_QUESTION
     if balance < required:
         raise HTTPException(status_code=402, detail=f"크레딧 부족 (필요: {required}, 보유: {balance})")
 
     school_res = supabase.table("schools").select("*")\
-        .eq("user_id", user.id).eq("school_id", req.school_id).execute()
+        .eq("user_id", user.id).eq("school_id", school_id).execute()
     school = school_res.data[0] if school_res.data else {}
     stems = school.get("stems", {})
 
     tmpl_res = supabase.table("templates").select("*")\
-        .eq("user_id", user.id).eq("school_id", req.school_id).execute()
+        .eq("user_id", user.id).eq("school_id", school_id).execute()
     template_map = {t["type_code"]: t["prompt"] for t in (tmpl_res.data or [])}
 
-    if req.passage_id:
+    if passage_id:
         supabase.table("passages").upsert({
             "user_id": user.id,
-            "school_id": req.school_id,
-            "passage_id": req.passage_id,
-            "content": req.passage,
+            "school_id": school_id,
+            "passage_id": passage_id,
+            "content": passage,
         }, on_conflict="user_id,school_id,passage_id").execute()
 
     results = []
     system_prompt = build_system_prompt()
 
-    for type_code in req.type_codes:
+    for type_code in type_codes:
         stem = get_stem(stems, type_code)
         prompt = template_map.get(type_code, "")
         stem_line = f'이 학교의 발문: "{stem}" — 이 발문을 그대로 question 첫 줄에 사용하라.\n\n' if stem else ""
-        user_prompt = f"[{type_code}] 유형 문제를 출제하세요.\n\n{stem_line}출제 지침:\n{prompt}\n\n지문/입력:\n{req.passage}\n\n반드시 JSON만 출력하세요."
+        user_prompt = f"[{type_code}] 유형 문제를 출제하세요.\n\n{stem_line}출제 지침:\n{prompt}\n\n지문/입력:\n{passage}\n\n반드시 JSON만 출력하세요."
 
         try:
             raw = await call_claude(system_prompt, user_prompt)
@@ -232,8 +209,8 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
 
             q_res = supabase.table("questions").insert({
                 "user_id": user.id,
-                "school_id": req.school_id,
-                "passage_id": req.passage_id or "",
+                "school_id": school_id,
+                "passage_id": passage_id or "",
                 "type_code": type_code,
                 "stem": stem or parsed.get("question", "").split("\n")[0],
                 "question": parsed.get("question", ""),
@@ -255,7 +232,7 @@ async def generate_questions(req: GenerateRequest, user=Depends(get_current_user
                 "user_id": user.id,
                 "amount": -CREDIT_PER_QUESTION,
                 "type": "use",
-                "description": f"{req.school_id} {type_code} 문제 생성",
+                "description": f"{school_id} {type_code} 문제 생성",
             }).execute()
             balance -= CREDIT_PER_QUESTION
 
@@ -276,19 +253,9 @@ async def get_questions(school_id: Optional[str] = None, user=Depends(get_curren
     res = q.order("created_at", desc=True).execute()
     return res.data
 
-class QuestionUpdate(BaseModel):
-    stem: Optional[str] = None
-    question: Optional[str] = None
-    choices: Optional[List[str]] = None
-    answer: Optional[str] = None
-    explanation: Optional[str] = None
-    status: Optional[str] = None
-    memo: Optional[str] = None
-
 @app.put("/questions/{question_id}")
-async def update_question(question_id: str, data: QuestionUpdate, user=Depends(get_current_user)):
-    # pydantic v1 호환: dict()로 변환 후 None 제거
-    update_data = {k: v for k, v in data.__dict__.items() if v is not None}
+async def update_question(question_id: str, data: Dict[str, Any] = Body(...), user=Depends(get_current_user)):
+    update_data = {k: v for k, v in data.items() if v is not None}
     res = supabase.table("questions").update(update_data)\
         .eq("id", question_id).eq("user_id", user.id).execute()
     return res.data
@@ -317,12 +284,7 @@ async def regenerate_question(question_id: str, user=Depends(get_current_user)):
     passage = p_res.data[0]["content"]
 
     gen_res = await generate_questions(
-        GenerateRequest(
-            passage=passage,
-            type_codes=[type_code],
-            school_id=school_id,
-            passage_id=passage_id,
-        ),
+        {"passage": passage, "type_codes": [type_code], "school_id": school_id, "passage_id": passage_id},
         user
     )
 
